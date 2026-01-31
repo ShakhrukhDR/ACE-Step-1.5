@@ -461,13 +461,16 @@ def create_openrouter_router(app_state_getter) -> APIRouter:
         )
 
         # Handle streaming vs non-streaming
+        print(f"[OpenRouter] stream={req.stream}, starting generation...")
         if req.stream:
             return StreamingResponse(
                 _stream_generation(state, gen_params, req.model, audio_format),
                 media_type="text/event-stream",
             )
         else:
-            return await _sync_generation(state, gen_params, req.model, audio_format)
+            response = await _sync_generation(state, gen_params, req.model, audio_format)
+            print(f"[OpenRouter] _sync_generation returned, response.id={response.id}")
+            return response
 
     return router
 
@@ -552,6 +555,7 @@ async def _sync_generation(
     Returns a complete ChatCompletionResponse with generated audio.
     """
     from concurrent.futures import ThreadPoolExecutor
+    import functools
 
     completion_id = _generate_completion_id()
     created_timestamp = int(time.time())
@@ -563,10 +567,13 @@ async def _sync_generation(
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=1)
 
-        result = await loop.run_in_executor(
-            executor,
-            lambda: _run_generation(state, gen_params)
-        )
+        print(f"[OpenRouter] _sync_generation: Starting generation...")
+
+        # Use functools.partial instead of lambda for better compatibility
+        gen_func = functools.partial(_run_generation, state, gen_params)
+        result = await loop.run_in_executor(executor, gen_func)
+
+        print(f"[OpenRouter] _sync_generation: Generation completed, result={result.get('success')}")
 
         # Build response
         audio_outputs = []
@@ -624,6 +631,7 @@ async def _stream_generation(
     Yields SSE events during generation and final audio data.
     """
     from concurrent.futures import ThreadPoolExecutor
+    import functools
 
     completion_id = _generate_completion_id()
     created_timestamp = int(time.time())
@@ -643,49 +651,53 @@ async def _stream_generation(
 
     try:
         # Send initial message
+        print("[OpenRouter] Stream: Sending initial message...")
         yield _make_chunk(DeltaContent(role="assistant", content="Generating music..."))
 
-        # Run generation
+        # Run generation in thread pool
         loop = asyncio.get_running_loop()
         executor = getattr(state, "executor", None)
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=1)
 
-        result = await loop.run_in_executor(
-            executor,
-            lambda: _run_generation(state, gen_params)
-        )
+        print("[OpenRouter] Stream: Starting generation in executor...")
+        gen_func = functools.partial(_run_generation, state, gen_params)
+        result = await loop.run_in_executor(executor, gen_func)
+        print(f"[OpenRouter] Stream: Generation completed, success={result.get('success')}")
 
         # Send result
         if result.get("success"):
             audio_paths = result.get("audio_paths", [])
             audio_outputs = []
-            print(f"[OpenRouter] Generation success, audio_paths={audio_paths}")
+            print(f"[OpenRouter] Stream: audio_paths={audio_paths}")
 
             for path in audio_paths:
-                print(f"[OpenRouter] Processing path: {path}, exists={os.path.exists(path) if path else False}")
                 if path and os.path.exists(path):
                     b64_url = _audio_to_base64_url(path, audio_format)
-                    print(f"[OpenRouter] b64_url length: {len(b64_url) if b64_url else 0}")
+                    print(f"[OpenRouter] Stream: b64_url length={len(b64_url) if b64_url else 0}")
                     if b64_url:
                         audio_outputs.append(AudioOutput(
                             audio_url=AudioOutputUrl(url=b64_url)
                         ))
 
-            print(f"[OpenRouter] audio_outputs count: {len(audio_outputs)}")
+            print(f"[OpenRouter] Stream: Sending completion chunk with {len(audio_outputs)} audio outputs...")
             yield _make_chunk(DeltaContent(
                 content="\n\nGeneration complete.",
                 audio=audio_outputs if audio_outputs else None,
             ))
         else:
             error_msg = result.get("error", "Unknown error")
+            print(f"[OpenRouter] Stream: Generation failed: {error_msg}")
             yield _make_chunk(DeltaContent(content=f"\n\nError: {error_msg}"))
 
         # Send finish
+        print("[OpenRouter] Stream: Sending finish chunk...")
         yield _make_chunk(DeltaContent(), finish_reason="stop")
         yield "data: [DONE]\n\n"
+        print("[OpenRouter] Stream: All chunks sent successfully")
 
     except Exception as e:
+        print(f"[OpenRouter] Stream: Exception occurred: {e}")
         yield _make_chunk(DeltaContent(content=f"\n\nError: {str(e)}"))
         yield _make_chunk(DeltaContent(), finish_reason="error")
         yield "data: [DONE]\n\n"
