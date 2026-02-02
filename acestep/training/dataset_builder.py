@@ -11,6 +11,7 @@ Provides functionality to:
 import os
 import json
 import uuid
+import shutil
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
@@ -1109,12 +1110,11 @@ class DatasetBuilder:
     def generate_prior_samples(
         self,
         dit_handler,
-        llm_handler,
         output_dir: str,
         num_samples: int = None,
         progress_callback=None,
     ) -> Tuple[List[str], str]:
-        """Generate prior preservation samples using the original model.
+        """Generate prior preservation samples using DiT only (no LLM).
 
         These samples are generated WITHOUT the custom_tag, using only the base
         caption/genre. They serve as regularization data to prevent the model
@@ -1122,7 +1122,6 @@ class DatasetBuilder:
 
         Args:
             dit_handler: Initialized DiT handler for audio generation
-            llm_handler: Initialized LLM handler for metadata generation
             output_dir: Directory to save generated audio files
             num_samples: Number of prior samples to generate (default: same as dataset)
             progress_callback: Optional callback for progress updates
@@ -1130,8 +1129,6 @@ class DatasetBuilder:
         Returns:
             Tuple of (list of generated audio paths, status message)
         """
-        from acestep.inference import generate_music, GenerationParams, GenerationConfig
-
         if not self.samples:
             return [], "❌ No samples in dataset"
 
@@ -1167,41 +1164,36 @@ class DatasetBuilder:
                 else:
                     base_prompt = sample.caption
 
-                # Generate audio using original model (no LoRA)
-                params = GenerationParams(
-                    task_type="text2music",
-                    caption=base_prompt,
-                    lyrics=sample.lyrics,
-                    instrumental=sample.is_instrumental,
+                # Prepare lyrics
+                lyrics = sample.lyrics if sample.lyrics else "[Instrumental]"
+                if sample.is_instrumental:
+                    lyrics = "[Instrumental]"
+
+                # Generate audio using DiT directly (no LLM)
+                result = dit_handler.generate_music(
+                    captions=base_prompt,
+                    lyrics=lyrics,
                     bpm=sample.bpm,
-                    keyscale=sample.keyscale,
-                    timesignature=sample.timesignature,
-                    vocal_language=sample.language,
-                    duration=min(sample.duration, 60) if sample.duration else 30,
+                    key_scale=sample.keyscale or "",
+                    time_signature=sample.timesignature or "",
+                    vocal_language=sample.language or "unknown",
                     inference_steps=8,
-                    seed=42 + i,
-                    thinking=False,
-                )
-
-                config = GenerationConfig(
-                    batch_size=1,
+                    guidance_scale=7.0,
                     use_random_seed=False,
-                    audio_format="wav",
+                    seed=42 + i,
+                    audio_duration=min(sample.duration, 60) if sample.duration else 30,
+                    batch_size=1,
+                    task_type="text2music",
                 )
 
-                result = generate_music(
-                    dit_handler=dit_handler,
-                    llm_handler=llm_handler,
-                    params=params,
-                    config=config,
-                    save_dir=output_dir,
-                    progress=None,
-                )
-
-                if result.success and result.audios:
-                    audio_path = result.audios[0].get("path", "")
+                # dit_handler.generate_music returns dict with 'success', 'audios', 'error'
+                if result.get("success") and result.get("audios"):
+                    audio_path = result["audios"][0].get("path", "")
                     if audio_path and os.path.exists(audio_path):
-                        generated_paths.append(audio_path)
+                        # Copy to output_dir with new name
+                        new_path = os.path.join(output_dir, f"prior_{i:04d}.wav")
+                        shutil.copy2(audio_path, new_path)
+                        generated_paths.append(new_path)
                         success_count += 1
 
                         if progress_callback:
@@ -1211,7 +1203,8 @@ class DatasetBuilder:
                 else:
                     fail_count += 1
                     if progress_callback:
-                        progress_callback(f"❌ Failed prior {i+1}: {result.error}")
+                        error_msg = result.get("error", "Unknown error")
+                        progress_callback(f"❌ Failed prior {i+1}: {error_msg}")
 
             except Exception as e:
                 logger.exception(f"Error generating prior sample {i+1}")

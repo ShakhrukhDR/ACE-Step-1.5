@@ -707,17 +707,15 @@ def export_lora(
 
 def generate_prior_samples(
     dit_handler,
-    llm_handler,
     builder_state,
     num_samples: int,
     output_dir: str,
     progress=None,
 ) -> str:
-    """Generate prior preservation samples using the original model.
+    """Generate prior preservation samples using DiT only.
 
     Args:
         dit_handler: DiT handler for audio generation
-        llm_handler: LLM handler for metadata
         builder_state: Dataset builder state
         num_samples: Number of prior samples to generate
         output_dir: Directory to save generated audio
@@ -748,7 +746,6 @@ def generate_prior_samples(
 
     paths, status = builder_state.generate_prior_samples(
         dit_handler=dit_handler,
-        llm_handler=llm_handler,
         output_dir=output_dir.strip(),
         num_samples=int(num_samples),
         progress_callback=progress_callback,

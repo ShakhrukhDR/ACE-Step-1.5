@@ -1186,7 +1186,7 @@ def setup_training_event_handlers(demo, dit_handler, llm_handler, training_secti
     # Generate prior samples
     training_section["generate_prior_btn"].click(
         fn=lambda state, num, out_dir: train_h.generate_prior_samples(
-            dit_handler, llm_handler, state, num, out_dir
+            dit_handler, state, num, out_dir
         ),
         inputs=[
             training_section["dataset_builder_state"],
